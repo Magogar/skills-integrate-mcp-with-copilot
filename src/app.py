@@ -5,11 +5,19 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from pydantic import BaseModel
 import os
 from pathlib import Path
+import secrets
+
+# Initialize Firebase Admin SDK
+# Note: In production, set GOOGLE_APPLICATION_CREDENTIALS or pass cred
+cred = credentials.Certificate("path/to/serviceAccountKey.json")  # Placeholder
+firebase_admin.initialize_app(cred)
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
@@ -78,6 +86,21 @@ activities = {
 }
 
 
+# In-memory user database with roles
+users = {
+    "student@mergington.edu": {"password": "student", "role": "student"},
+    "admin@mergington.edu": {"password": "admin", "role": "club_admin"},
+    "super@mergington.edu": {"password": "super", "role": "super_admin"}
+}
+
+security = HTTPBasic()
+
+def verify_user(credentials: HTTPBasicCredentials = Depends(security)):
+    user = users.get(credentials.username)
+    if not user or not secrets.compare_digest(credentials.password, user["password"]):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    return {"email": credentials.username, "role": user["role"]}
+
 @app.get("/")
 def root():
     return RedirectResponse(url="/static/index.html")
@@ -89,8 +112,12 @@ def get_activities():
 
 
 @app.post("/activities/{activity_name}/signup")
-def signup_for_activity(activity_name: str, email: str):
+def signup_for_activity(activity_name: str, email: str, user: dict = Depends(verify_user)):
     """Sign up a student for an activity"""
+    # Check role: only students can sign up themselves
+    if user["role"] not in ["student", "club_admin", "super_admin"]:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    # For simplicity, allow any authenticated user to sign up with any email, but in real, check if email matches user
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
@@ -105,14 +132,21 @@ def signup_for_activity(activity_name: str, email: str):
             detail="Student is already signed up"
         )
 
+    # Check max participants
+    if len(activity["participants"]) >= activity["max_participants"]:
+        raise HTTPException(status_code=400, detail="Activity is full")
+
     # Add student
     activity["participants"].append(email)
     return {"message": f"Signed up {email} for {activity_name}"}
 
 
 @app.delete("/activities/{activity_name}/unregister")
-def unregister_from_activity(activity_name: str, email: str):
+def unregister_from_activity(activity_name: str, email: str, user: dict = Depends(verify_user)):
     """Unregister a student from an activity"""
+    # Check role: only admins can unregister
+    if user["role"] not in ["club_admin", "super_admin"]:
+        raise HTTPException(status_code=403, detail="Only admins can unregister students")
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
